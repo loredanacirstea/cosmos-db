@@ -25,6 +25,8 @@ const (
 	//   - pure go
 	//   - use pebble build tag (go build -tags pebbledb)
 	PebbleDBBackend BackendType = "pebbledb"
+
+	SqliteBackend BackendType = "sqlite"
 )
 
 type (

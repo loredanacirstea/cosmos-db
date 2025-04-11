@@ -6,6 +6,7 @@ require (
 	github.com/cockroachdb/pebble v1.1.0
 	github.com/google/btree v1.1.2
 	github.com/linxGnu/grocksdb v1.8.12
+	github.com/mattn/go-sqlite3 v1.14.24
 	github.com/spf13/cast v1.6.0
 	github.com/stretchr/testify v1.8.4
 	// Pinned to this version to avoid bugs in following commits. See https://github.com/cosmos/cosmos-sdk/pull/14952
