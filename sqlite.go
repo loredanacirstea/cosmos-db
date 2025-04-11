@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -24,7 +25,7 @@ var _ DB = (*SqliteDb)(nil)
 
 const (
 	driverName = "sqlite3"
-	dbName     = "ss.db?cache=shared&mode=rwc&_journal_mode=WAL"
+	// dbName     = "ss.db?cache=shared&mode=rwc&_journal_mode=WAL"
 
 	reservedUpsertStmt = `
 	INSERT INTO state_storage(key, value)
@@ -47,9 +48,13 @@ func NewSqliteDb(name string, dir string, opts Options) (*SqliteDb, error) {
 
 func NewSqliteDbWithOpts(name string, dir string, opts Options) (*SqliteDb, error) {
 	dbPath := filepath.Join(dir, name+DBFileSuffix)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create DB directory '%s': %w", dir, err)
+	}
+
 	db, err := sql.Open(driverName, dbPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open sqlite DB: %w", err)
+		return nil, fmt.Errorf("failed to open sqlite DB '%s': %w", dbPath, err)
 	}
 
 	stmt := `
