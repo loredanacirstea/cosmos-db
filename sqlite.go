@@ -80,6 +80,11 @@ func NewSqliteDbWithOpts(name string, dir string, opts Options) (*SqliteDb, erro
 	if err != nil {
 		return nil, fmt.Errorf("failed to exec SQL statement: %w", err)
 	}
+	_, err = db.Exec(`PRAGMA journal_mode = WAL;`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to exec SQL statement: %w", err)
+	}
+
 	return &SqliteDb{db: db}, nil
 }
 
