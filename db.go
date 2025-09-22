@@ -27,6 +27,8 @@ const (
 	PebbleDBBackend BackendType = "pebbledb"
 
 	SqliteBackend BackendType = "sqlite"
+
+	PostgreSQLBackend BackendType = "postgresql"
 )
 
 type (

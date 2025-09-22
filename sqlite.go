@@ -57,6 +57,18 @@ func NewSqliteDbWithOpts(name string, dir string, opts Options) (*SqliteDb, erro
 		return nil, fmt.Errorf("failed to open sqlite DB '%s': %w", dbPath, err)
 	}
 
+	// if opts != nil {
+	// 	files := cast.ToInt(opts.Get("maxopenfiles"))
+	// 	if files > 0 {
+	// 		defaultOpts.OpenFilesCacheCapacity = files
+	// 	}
+	// }
+
+	// db.SetConnMaxIdleTime()
+	// db.SetConnMaxLifetime()
+	// db.SetMaxIdleConns()
+	// db.SetMaxOpenConns()
+
 	stmt := `
 	CREATE TABLE IF NOT EXISTS state_storage (
 		id integer not null primary key,
