@@ -10,6 +10,13 @@ import (
 )
 
 var _ Batch = (*postgresqlBatch)(nil)
+var _ PostgreSqlBatch = (*postgresqlBatch)(nil)
+
+type PostgreSqlBatch interface {
+	Batch
+	Tx() pgx.Tx
+	Invalidate()
+}
 
 type postgresqlBatchOp struct {
 	action     batchAction
@@ -97,7 +104,7 @@ func (b *postgresqlBatch) Write() (err error) {
 	defer func() {
 		if err != nil && b.tx != nil {
 			_ = b.tx.Rollback(b.ctx)
-			b.tx = nil
+			b.Invalidate()
 		}
 	}()
 
@@ -162,7 +169,7 @@ func (b *postgresqlBatch) Write() (err error) {
 	if err = b.tx.Commit(b.ctx); err != nil {
 		return fmt.Errorf("failed to commit PostgreSQL transaction: %w", err)
 	}
-	b.tx = nil
+	b.Invalidate()
 	return nil
 }
 
@@ -172,10 +179,14 @@ func (b *postgresqlBatch) Close() error {
 		if err != nil {
 			return err
 		}
-		b.tx = nil
-		b.db.RemoveBatch(b.index)
+		b.Invalidate()
 	}
 	return nil
+}
+
+func (b *postgresqlBatch) Invalidate() {
+	b.tx = nil
+	b.db.RemoveBatch(b.index)
 }
 
 func (b *postgresqlBatch) GetByteSize() (int, error) {
@@ -194,4 +205,8 @@ func (b *postgresqlBatch) WriteSync() error {
 		return err
 	}
 	return b.Close()
+}
+
+func (b *postgresqlBatch) Tx() pgx.Tx {
+	return b.tx
 }

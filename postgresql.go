@@ -45,17 +45,19 @@ func NewPostgreSQLDb(name string, dir string, opts Options) (*PostgreSQLDb, erro
 }
 
 func NewPostgreSQLDbWithOpts(name string, dir string, opts Options) (*PostgreSQLDb, error) {
-	connection := `postgresql://localhost:5432/postgres`
 	dbname := strings.ReplaceAll(dir, "/", "_") + "_" + name
-
+	connection := `postgresql://localhost:5432/postgres`
 	if opts != nil {
 		conn := cast.ToString(opts.Get("connection"))
 		if conn != "" {
 			connection = conn
 		}
 	}
+	return NewPostgreSQLDbWithCtx(context.Background(), dbname, connection, opts)
+}
 
-	ctx, ctxCancel := context.WithCancel(context.Background())
+func NewPostgreSQLDbWithCtx(parentCtx context.Context, dbname string, connection string, opts Options) (*PostgreSQLDb, error) {
+	ctx, ctxCancel := context.WithCancel(parentCtx)
 	config, err := pgxpool.ParseConfig(connection)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse PostgreSQL config: %w", err)
@@ -88,22 +90,23 @@ func NewPostgreSQLDbWithOpts(name string, dir string, opts Options) (*PostgreSQL
 		return nil, fmt.Errorf("failed to ping PostgreSQL database: %w", err)
 	}
 
-	if err := ensureDatabase(ctx, pool, dbname); err != nil {
+	if dbname != "" {
+		if err := ensureDatabase(ctx, pool, dbname); err != nil {
+			pool.Close()
+			return nil, fmt.Errorf("failed to create PostgreSQL database: %w", err)
+		}
+		// switch to our database
+		config.ConnConfig.Database = dbname
 		pool.Close()
-		return nil, fmt.Errorf("failed to create PostgreSQL database: %w", err)
-	}
-
-	// switch to our database
-	config.ConnConfig.Database = dbname
-	pool.Close()
-	pool, err = pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create PostgreSQL connection pool: %w", err)
-	}
-	// Test connection
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("failed to ping PostgreSQL database: %w", err)
+		pool, err = pgxpool.NewWithConfig(ctx, config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create PostgreSQL connection pool: %w", err)
+		}
+		// Test connection
+		if err := pool.Ping(ctx); err != nil {
+			pool.Close()
+			return nil, fmt.Errorf("failed to ping PostgreSQL database: %w", err)
+		}
 	}
 
 	createTableStmt := `
@@ -147,7 +150,14 @@ func ensureDatabase(ctx context.Context, pool *pgxpool.Pool, dbName string) erro
 	return nil
 }
 
+func (p *PostgreSQLDb) Pool() *pgxpool.Pool {
+	return p.pool
+}
+
 func (p *PostgreSQLDb) Close() error {
+	if len(p.batchesMap) > 0 {
+		fmt.Println("postgresql closing unclosed batches:", len(p.batchesMap))
+	}
 	for _, b := range p.batchesMap {
 		b.Close()
 	}
@@ -251,6 +261,16 @@ func (p *PostgreSQLDb) NewBatch() Batch {
 	}
 	p.batchesMap[p.counter] = batch
 	return batch
+}
+
+func (p *PostgreSQLDb) NewBatchWithError() (PostgreSqlBatch, error) {
+	p.counter += 1
+	batch, err := NewPostgreSQLBatch(p.pool, p.ctx, p, p.counter)
+	if err != nil {
+		return nil, err
+	}
+	p.batchesMap[p.counter] = batch
+	return batch, nil
 }
 
 func (p *PostgreSQLDb) NewBatchWithSize(size int) Batch {
