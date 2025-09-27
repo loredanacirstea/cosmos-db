@@ -32,10 +32,10 @@ var _ DB = (*PostgreSQLDb)(nil)
 
 const (
 	postgresqlUpsertStmt = `
-	INSERT INTO state_storage(key, value)
-    VALUES($1, $2)
-  ON CONFLICT(key) DO UPDATE SET
-    value = $2;
+		INSERT INTO state_storage(key, value)
+		VALUES($1, $2)
+		ON CONFLICT(key) DO UPDATE SET
+			value = EXCLUDED.value;
 	`
 	postgresqlDelStmt = `DELETE FROM state_storage WHERE key = $1;`
 )
@@ -63,8 +63,8 @@ func NewPostgreSQLDbWithCtx(parentCtx context.Context, dbname string, connection
 		return nil, fmt.Errorf("failed to parse PostgreSQL config: %w", err)
 	}
 
-	// Set pool configuration - increased for high concurrency
-	config.MaxConns = 50
+	// Set pool configuration
+	config.MaxConns = 100
 	config.MinConns = 5
 
 	// TODO rest of config
@@ -109,6 +109,7 @@ func NewPostgreSQLDbWithCtx(parentCtx context.Context, dbname string, connection
 		}
 	}
 
+	// Main storage table
 	createTableStmt := `
 	CREATE TABLE IF NOT EXISTS state_storage (
 		id SERIAL PRIMARY KEY,
@@ -116,16 +117,15 @@ func NewPostgreSQLDbWithCtx(parentCtx context.Context, dbname string, connection
 		value BYTEA NOT NULL,
 		UNIQUE (key)
 	);`
-
 	if _, err = pool.Exec(ctx, createTableStmt); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("failed to create PostgreSQL table: %w", err)
 	}
 
-	createIndexStmt := `CREATE UNIQUE INDEX IF NOT EXISTS idx_key ON state_storage (key);`
+	createIndexStmt := `CREATE UNIQUE INDEX IF NOT EXISTS idx_key_unique ON state_storage (key);`
 	if _, err = pool.Exec(ctx, createIndexStmt); err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("failed to create PostgreSQL index: %w", err)
+		return nil, fmt.Errorf("failed to create PostgreSQL unique index: %w", err)
 	}
 
 	return &PostgreSQLDb{
@@ -190,7 +190,6 @@ func (p *PostgreSQLDb) Get(key []byte) ([]byte, error) {
 	if len(key) == 0 {
 		return nil, errKeyEmpty
 	}
-
 	var value []byte
 	err := p.pool.QueryRow(p.ctx, `
 		SELECT value FROM state_storage
@@ -208,11 +207,22 @@ func (p *PostgreSQLDb) Get(key []byte) ([]byte, error) {
 }
 
 func (p *PostgreSQLDb) Has(key []byte) (bool, error) {
-	value, err := p.Get(key)
-	if err != nil {
-		return false, err
+	if len(key) == 0 {
+		return false, errKeyEmpty
 	}
-	return value != nil, nil
+	var exists bool
+	err := p.pool.QueryRow(p.ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM state_storage WHERE key = $1
+		);
+	`, key).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("failed to check key existence: %w", err)
+	}
+	if !exists {
+		return false, nil
+	}
+	return true, nil
 }
 
 func (p *PostgreSQLDb) Set(key []byte, value []byte) error {
@@ -305,4 +315,13 @@ func (p *PostgreSQLDb) Stats() map[string]string {
 		stats["max_conns"] = fmt.Sprintf("%d", poolStats.MaxConns())
 	}
 	return stats
+}
+
+// VacuumAnalyze triggers PostgreSQL to clean up and refresh planner statistics.
+func (p *PostgreSQLDb) VacuumAnalyze() error {
+	_, err := p.pool.Exec(p.ctx, `VACUUM ANALYZE state_storage;`)
+	if err != nil {
+		return fmt.Errorf("failed to run VACUUM ANALYZE: %w", err)
+	}
+	return nil
 }
