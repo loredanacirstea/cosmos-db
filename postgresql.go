@@ -56,6 +56,51 @@ func NewPostgreSQLDbWithOpts(name string, dir string, opts Options) (*PostgreSQL
 	return NewPostgreSQLDbWithCtx(context.Background(), dbname, connection, opts)
 }
 
+// RemovePostgreSQLDb drops the database created via NewPostgreSQLDb/NewPostgreSQLDbWithOpts.
+func RemovePostgreSQLDb(name string, dir string, opts Options) error {
+	dbname := strings.ReplaceAll(dir, "/", "_") + "_" + name
+	connection := "postgresql://localhost:5432/postgres"
+	if opts != nil {
+		conn := cast.ToString(opts.Get("connection"))
+		if conn != "" {
+			connection = conn
+		}
+	}
+
+	ctx := context.Background()
+	config, err := pgxpool.ParseConfig(connection)
+	if err != nil {
+		return fmt.Errorf("failed to parse PostgreSQL config: %w", err)
+	}
+
+	// Ensure we connect to a control database, not the target itself.
+	if config.ConnConfig.Database == "" || config.ConnConfig.Database == dbname {
+		config.ConnConfig.Database = "postgres"
+	}
+
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		return fmt.Errorf("failed to create PostgreSQL connection pool: %w", err)
+	}
+	defer pool.Close()
+
+	// Terminate active sessions so the drop can succeed.
+	if _, err := pool.Exec(ctx, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1`, dbname); err != nil {
+		return fmt.Errorf("failed to terminate sessions for %s: %w", dbname, err)
+	}
+
+	_, err = pool.Exec(ctx, fmt.Sprintf(`DROP DATABASE "%s"`, dbname))
+	if err != nil {
+		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "3D000" {
+			// database does not exist
+			return nil
+		}
+		return fmt.Errorf("failed to drop PostgreSQL database %s: %w", dbname, err)
+	}
+
+	return nil
+}
+
 func NewPostgreSQLDbWithCtx(parentCtx context.Context, dbname string, connection string, opts Options) (*PostgreSQLDb, error) {
 	ctx, ctxCancel := context.WithCancel(parentCtx)
 	config, err := pgxpool.ParseConfig(connection)
