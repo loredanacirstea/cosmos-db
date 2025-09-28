@@ -109,7 +109,7 @@ func NewPostgreSQLDbWithCtx(parentCtx context.Context, dbname string, connection
 	}
 
 	// Set pool configuration
-	config.MaxConns = 100
+	config.MaxConns = 500
 	config.MinConns = 5
 
 	// TODO rest of config

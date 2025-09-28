@@ -1,7 +1,6 @@
 package db
 
 import (
-	"os"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -10,7 +9,7 @@ import (
 func TestPostgreSQLDb(t *testing.T) {
 	db, err := NewPostgreSQLDb("testdb", "", nil)
 	require.NoError(t, err)
-	defer db.Close()
+	defer cleanupPostgresDB("testdb", "", db)
 
 	// Set
 	err = db.Set([]byte{1, 2, 4}, []byte{1, 1, 1})
@@ -30,6 +29,7 @@ func TestPostgreSQLDb(t *testing.T) {
 	batch := db.NewBatchWithSize(100000)
 	err = batch.Set([]byte{1, 2, 3}, []byte{2, 2, 2})
 	require.NoError(t, err)
+
 	err = batch.Write()
 	require.NoError(t, err)
 	err = batch.Close()
@@ -40,15 +40,9 @@ func TestPostgreSQLDb(t *testing.T) {
 }
 
 func TestPostgreSQLIterator(t *testing.T) {
-	// Skip test if PostgreSQL connection string not provided
-	connString := os.Getenv("POSTGRES_TEST_URL")
-	if connString == "" {
-		t.Skip("Skipping PostgreSQL test: POSTGRES_TEST_URL environment variable not set")
-	}
-
-	db, err := NewPostgreSQLDb("testdb", connString, nil)
+	db, err := NewPostgreSQLDb("testdb", "", nil)
 	require.NoError(t, err)
-	defer db.Close()
+	defer cleanupPostgresDB("testdb", "", db)
 
 	// Set up test data
 	testData := map[string]string{
@@ -89,4 +83,9 @@ func TestPostgreSQLIterator(t *testing.T) {
 		reverseCount++
 	}
 	require.Equal(t, 3, reverseCount)
+}
+
+func cleanupPostgresDB(name string, dir string, db *PostgreSQLDb) error {
+	db.Close()
+	return RemovePostgreSQLDb(name, dir, nil)
 }

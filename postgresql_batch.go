@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	pgx "github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -108,57 +107,18 @@ func (b *postgresqlBatch) Write() (err error) {
 		}
 	}()
 
-	var (
-		setOps []postgresqlBatchOp
-		delOps []postgresqlBatchOp
-	)
-
 	for _, op := range b.ops {
 		switch op.action {
 		case batchActionSet:
-			setOps = append(setOps, op)
+			if _, err = b.tx.Exec(b.ctx, postgresqlUpsertStmt, op.key, op.value); err != nil {
+				return fmt.Errorf("failed to exec batch set: %w", err)
+			}
 		case batchActionDel:
-			delOps = append(delOps, op)
-		}
-	}
-
-	// Bulk insert/update for sets
-	if len(setOps) > 0 {
-		valueStrings := make([]string, 0, len(setOps))
-		valueArgs := make([]any, 0, len(setOps)*2)
-
-		for i, op := range setOps {
-			// ($1,$2), ($3,$4), ...
-			idx := i*2 + 1
-			valueStrings = append(valueStrings, fmt.Sprintf("($%d,$%d)", idx, idx+1))
-			valueArgs = append(valueArgs, op.key, op.value)
-		}
-
-		stmt := fmt.Sprintf(`
-            INSERT INTO state_storage (key, value)
-            VALUES %s
-            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
-        `, strings.Join(valueStrings, ","))
-
-		if _, err = b.tx.Exec(b.ctx, stmt, valueArgs...); err != nil {
-			return fmt.Errorf("failed to bulk upsert: %w", err)
-		}
-	}
-
-	// Bulk delete for dels
-	if len(delOps) > 0 {
-		valueStrings := make([]string, 0, len(delOps))
-		valueArgs := make([]any, 0, len(delOps))
-
-		for i, op := range delOps {
-			idx := i + 1
-			valueStrings = append(valueStrings, fmt.Sprintf("$%d", idx))
-			valueArgs = append(valueArgs, op.key)
-		}
-
-		stmt := fmt.Sprintf(`DELETE FROM state_storage WHERE key IN (%s)`, strings.Join(valueStrings, ","))
-		if _, err = b.tx.Exec(b.ctx, stmt, valueArgs...); err != nil {
-			return fmt.Errorf("failed to bulk delete: %w", err)
+			if _, err = b.tx.Exec(b.ctx, postgresqlDelStmt, op.key); err != nil {
+				return fmt.Errorf("failed to exec batch delete: %w", err)
+			}
+		default:
+			return fmt.Errorf("unknown batch action: %v", op.action)
 		}
 	}
 
