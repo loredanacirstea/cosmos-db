@@ -1,8 +1,10 @@
 package db
 
 import (
+	"context"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
 
@@ -88,4 +90,67 @@ func TestPostgreSQLIterator(t *testing.T) {
 func cleanupPostgresDB(name string, dir string, db *PostgreSQLDb) error {
 	db.Close()
 	return RemovePostgreSQLDb(name, dir, nil)
+}
+
+func TestPostgreSQLEmbeddings(t *testing.T) {
+	requirePgVector(t)
+
+	opts := OptionsMap{
+		optionEnableEmbeddings:   true,
+		optionEmbeddingDimension: 3,
+		optionEmbeddingMetric:    string(embeddingMetricCosine),
+	}
+
+	db, err := NewPostgreSQLDb("testdb_embeddings", "", opts)
+	if err != nil {
+		t.Skipf("skipping pgvector test: %v", err)
+		return
+	}
+	defer cleanupPostgresDB("testdb_embeddings", "", db)
+
+	err = db.Set([]byte("key1"), []byte("value1"))
+	require.NoError(t, err)
+	err = db.Set([]byte("key2"), []byte("value2"))
+	require.NoError(t, err)
+
+	err = db.UpsertEmbedding([]byte("key1"), []float32{0.9, 0.1, 0})
+	require.NoError(t, err)
+	err = db.UpsertEmbedding([]byte("key2"), []float32{0.1, 0.9, 0})
+	require.NoError(t, err)
+
+	var embeddingCount int
+	err = db.Pool().QueryRow(context.Background(), `SELECT count(*) FROM state_embeddings`).Scan(&embeddingCount)
+	require.NoError(t, err)
+	require.Equal(t, 2, embeddingCount)
+
+	vec, err := db.GetEmbedding([]byte("key1"))
+	require.NoError(t, err)
+	require.Equal(t, []float32{0.9, 0.1, 0}, vec)
+
+	results, err := db.SimilaritySearch([]float32{0.85, 0.15, 0}, 1)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Equal(t, []byte("key1"), results[0].Key)
+
+	err = db.Delete([]byte("key1"))
+	require.NoError(t, err)
+	vec, err = db.GetEmbedding([]byte("key1"))
+	require.NoError(t, err)
+	require.Nil(t, vec)
+}
+
+func requirePgVector(t *testing.T) {
+	t.Helper()
+
+	pool, err := pgxpool.New(context.Background(), "postgresql://localhost:5432/postgres")
+	if err != nil {
+		t.Skipf("postgres unavailable: %v", err)
+		return
+	}
+	defer pool.Close()
+
+	if _, err := pool.Exec(context.Background(), `CREATE EXTENSION IF NOT EXISTS vector;`); err != nil {
+		t.Skipf("pgvector extension is not available: %v", err)
+		return
+	}
 }

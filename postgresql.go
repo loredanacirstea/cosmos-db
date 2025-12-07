@@ -26,6 +26,10 @@ type PostgreSQLDb struct {
 	ctxCancel  context.CancelFunc
 	batchesMap map[int64]*postgresqlBatch
 	counter    int64
+	// Vector embeddings support (pgvector)
+	enableEmbeddings   bool
+	embeddingDimension int
+	embeddingMetric    embeddingMetric
 }
 
 var _ DB = (*PostgreSQLDb)(nil)
@@ -37,8 +41,74 @@ const (
 		ON CONFLICT(key) DO UPDATE SET
 			value = EXCLUDED.value;
 	`
-	postgresqlDelStmt = `DELETE FROM state_storage WHERE key = $1;`
+	postgresqlDelStmt             = `DELETE FROM state_storage WHERE key = $1;`
+	postgresqlDelEmbeddingStmt    = `DELETE FROM state_embeddings WHERE key = $1;`
+	postgresqlUpsertEmbeddingStmt = `
+		INSERT INTO state_embeddings(key, embedding)
+		VALUES($1, $2)
+		ON CONFLICT(key) DO UPDATE SET
+			embedding = EXCLUDED.embedding;
+	`
+	postgresqlGetEmbeddingStmt = `
+		SELECT embedding FROM state_embeddings
+		WHERE key = $1
+		LIMIT 1;
+	`
 )
+
+const (
+	optionEnableEmbeddings   = "enable_embeddings"
+	optionEmbeddingDimension = "embedding_dimension"
+	optionEmbeddingMetric    = "embedding_metric"
+
+	defaultEmbeddingDimension = 1536
+	defaultEmbeddingMetric    = embeddingMetricCosine
+)
+
+var errEmbeddingsDisabled = errors.New("postgresql embeddings are disabled; set enable_embeddings option")
+
+type embeddingMetric string
+
+const (
+	embeddingMetricCosine       embeddingMetric = "cosine"
+	embeddingMetricEuclideanL2  embeddingMetric = "l2"
+	embeddingMetricInnerProduct embeddingMetric = "ip"
+)
+
+func (m embeddingMetric) operator() string {
+	switch m {
+	case embeddingMetricInnerProduct:
+		return "<#>"
+	case embeddingMetricEuclideanL2:
+		return "<->"
+	default:
+		return "<=>"
+	}
+}
+
+func (m embeddingMetric) operatorClass() string {
+	switch m {
+	case embeddingMetricInnerProduct:
+		return "vector_ip_ops"
+	case embeddingMetricEuclideanL2:
+		return "vector_l2_ops"
+	default:
+		return "vector_cosine_ops"
+	}
+}
+
+func normalizeEmbeddingMetric(metric string) (embeddingMetric, error) {
+	switch strings.ToLower(metric) {
+	case "", string(embeddingMetricCosine):
+		return embeddingMetricCosine, nil
+	case string(embeddingMetricEuclideanL2):
+		return embeddingMetricEuclideanL2, nil
+	case string(embeddingMetricInnerProduct):
+		return embeddingMetricInnerProduct, nil
+	default:
+		return "", fmt.Errorf("unsupported embedding metric %q", metric)
+	}
+}
 
 func NewPostgreSQLDb(name string, dir string, opts Options) (*PostgreSQLDb, error) {
 	return NewPostgreSQLDbWithOpts(name, dir, opts)
@@ -103,6 +173,12 @@ func RemovePostgreSQLDb(name string, dir string, opts Options) error {
 
 func NewPostgreSQLDbWithCtx(parentCtx context.Context, dbname string, connection string, opts Options) (*PostgreSQLDb, error) {
 	ctx, ctxCancel := context.WithCancel(parentCtx)
+	success := false
+	defer func() {
+		if !success {
+			ctxCancel()
+		}
+	}()
 	config, err := pgxpool.ParseConfig(connection)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse PostgreSQL config: %w", err)
@@ -111,6 +187,10 @@ func NewPostgreSQLDbWithCtx(parentCtx context.Context, dbname string, connection
 	// Set pool configuration
 	config.MaxConns = 500
 	config.MinConns = 5
+
+	enableEmbeddings := false
+	embeddingDimension := defaultEmbeddingDimension
+	embeddingMetric := defaultEmbeddingMetric
 
 	// TODO rest of config
 	if opts != nil {
@@ -121,6 +201,16 @@ func NewPostgreSQLDbWithCtx(parentCtx context.Context, dbname string, connection
 		minconns := cast.ToInt(opts.Get("minconns"))
 		if minconns > 0 {
 			config.MinConns = int32(minconns)
+		}
+
+		enableEmbeddings = cast.ToBool(opts.Get(optionEnableEmbeddings))
+		if dim := cast.ToInt(opts.Get(optionEmbeddingDimension)); dim > 0 {
+			embeddingDimension = dim
+		}
+		if metric, err := normalizeEmbeddingMetric(cast.ToString(opts.Get(optionEmbeddingMetric))); err == nil {
+			embeddingMetric = metric
+		} else {
+			return nil, err
 		}
 	}
 
@@ -173,13 +263,25 @@ func NewPostgreSQLDbWithCtx(parentCtx context.Context, dbname string, connection
 		return nil, fmt.Errorf("failed to create PostgreSQL unique index: %w", err)
 	}
 
-	return &PostgreSQLDb{
-		pool:       pool,
-		ctx:        ctx,
-		ctxCancel:  ctxCancel,
-		counter:    0,
-		batchesMap: make(map[int64]*postgresqlBatch),
-	}, nil
+	if enableEmbeddings {
+		if err := setupPostgreSQLEmbeddings(ctx, pool, embeddingDimension, embeddingMetric); err != nil {
+			pool.Close()
+			return nil, err
+		}
+	}
+
+	db := &PostgreSQLDb{
+		pool:               pool,
+		ctx:                ctx,
+		ctxCancel:          ctxCancel,
+		counter:            0,
+		batchesMap:         make(map[int64]*postgresqlBatch),
+		enableEmbeddings:   enableEmbeddings,
+		embeddingDimension: embeddingDimension,
+		embeddingMetric:    embeddingMetric,
+	}
+	success = true
+	return db, nil
 }
 
 func ensureDatabase(ctx context.Context, pool *pgxpool.Pool, dbName string) error {
@@ -187,11 +289,40 @@ func ensureDatabase(ctx context.Context, pool *pgxpool.Pool, dbName string) erro
 	if err != nil {
 		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "42P04" {
 			// 42P04 = duplicate_database, ignore
-			log.Printf("database %s already exists", dbName)
+			log.Printf("database %s already exists, skipping creation", dbName)
 		} else {
 			return err
 		}
 	}
+	return nil
+}
+
+func setupPostgreSQLEmbeddings(ctx context.Context, pool *pgxpool.Pool, dimension int, metric embeddingMetric) error {
+	if dimension <= 0 {
+		return fmt.Errorf("embedding dimension must be greater than zero")
+	}
+
+	if _, err := pool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS vector;`); err != nil {
+		return fmt.Errorf("failed to enable pgvector extension: %w", err)
+	}
+
+	createTableStmt := fmt.Sprintf(`
+	CREATE TABLE IF NOT EXISTS state_embeddings (
+		key BYTEA PRIMARY KEY,
+		embedding vector(%d) NOT NULL
+	);`, dimension)
+	if _, err := pool.Exec(ctx, createTableStmt); err != nil {
+		return fmt.Errorf("failed to create PostgreSQL embeddings table: %w", err)
+	}
+
+	createIndexStmt := fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_state_embeddings_vector ON state_embeddings USING ivfflat (embedding %s) WITH (lists = 100);`,
+		metric.operatorClass(),
+	)
+	if _, err := pool.Exec(ctx, createIndexStmt); err != nil {
+		return fmt.Errorf("failed to create PostgreSQL embeddings index: %w", err)
+	}
+
 	return nil
 }
 
@@ -227,6 +358,11 @@ func (p *PostgreSQLDb) Delete(key []byte) error {
 	_, err := p.pool.Exec(p.ctx, postgresqlDelStmt, key)
 	if err != nil {
 		return fmt.Errorf("failed to execute PostgreSQL delete statement: %w", err)
+	}
+	if p.enableEmbeddings {
+		if _, err := p.pool.Exec(p.ctx, postgresqlDelEmbeddingStmt, key); err != nil {
+			return fmt.Errorf("failed to execute PostgreSQL embedding delete statement: %w", err)
+		}
 	}
 	return nil
 }
